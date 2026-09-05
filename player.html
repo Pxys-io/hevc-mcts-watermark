@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>wm2 playback check</title>
+<style>
+  body{background:#0d1117;color:#c9d1d9;font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;margin:0 auto;padding:24px;max-width:960px}
+  h1{font-size:18px;color:#e6edf3}
+  label{color:#8b949e;font-size:13px}
+  select{background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 10px;font-size:13px;margin:8px 0 14px}
+  video{width:100%;max-height:60vh;background:#000;border-radius:8px}
+  #status{margin-top:10px;font-size:12px;color:#8b949e;min-height:18px}
+  .err{color:#f85149} .ok{color:#3fb950}
+  #log{background:#010409;border:1px solid #30363d;border-radius:8px;padding:10px 12px;font:11px/1.6 ui-monospace,monospace;white-space:pre-wrap;max-height:280px;overflow-y:auto;margin-top:12px}
+  #log .e{color:#f85149} #log .w{color:#d29922} #log .g{color:#3fb950}
+  button{background:#238636;color:#fff;border:0;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer;margin-top:8px}
+  button:active{background:#1f6f2e}
+  button:disabled{background:#30363d;color:#8b949e;cursor:default}
+  select:disabled{background:#0d1117;color:#6e7681}
+  #wmstats{margin-top:12px;font-size:13px;color:#c9d1d9;background:#161b22;border:1px solid #21262d;border-radius:8px;padding:8px 12px}
+  #wmstats b{color:#e6edf3}
+  #wmrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+  #wmrow select{margin:0}
+  #wmrow button{margin-top:0}
+</style>
+</head>
+<body>
+<h1>wm2 — playback check (hls.js)</h1>
+<label for="method">Method:</label><br>
+<select id="method">
+  <option value="https://lec-host.pxysio.top/wm2test/bbb-mcts2/">HEVC MCTS — 10% slots (full re-encode, 15×4s) [needs HEVC decode]</option>
+  <option value="https://lec-host.pxysio.top/wm2test/bbb-slice2/">H.264 Slice fMP4 — 100% band (TS deprecated, transmux chokes)</option>
+  <option value="https://lec-host.pxysio.top/wm2test/bbb-slice4/">H.264 Slice fMP4 — 16px mid-band, bar only where marked (u42)</option>
+  <option value="https://lec-host.pxysio.top/wm2test/bbb-mcts-tileonly/">HEVC Tile — 100% band (bottom tile only) [needs HEVC decode]</option>
+  <option value="https://lec-host.pxysio.top/wm2test/bbb-splice10/">H.264 splice-10 pilot — 10x32px, seeded 10% segs (u42)</option>
+</select><br>
+<label for="src">Stream:</label><br>
+<select id="src">
+  <option value="master.u42.m3u8">Watermarked per-user master (u42)</option>
+  <option value="master.m3u8">Base master (unwatermarked, re-hosted)</option>
+  <option value="orig">Mux original (stream.mux.com)</option>
+</select>
+<video id="v" controls playsinline muted></video>
+<div id="status">idle</div>
+<div id="wmstats">watermark stats: loading…</div>
+<div id="wmrow">
+  <label for="wm">Watermark:</label>
+  <select id="wm" disabled><option>loading…</option></select>
+  <button id="wmjump" disabled>Jump to watermark −1s</button>
+  <button id="wmprev" disabled>‹ Prev</button>
+  <button id="wmnext" disabled>Next ›</button>
+</div>
+<pre id="log"></pre>
+<button id="copy">Copy log</button>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script>
+let BASE = "https://lec-host.pxysio.top/wm2test/bbb-mcts2/";
+// Build stats (rewritten by pipeline phase_manifests on every deploy; fallback if playlist fetch fails).
+const WM_BUILD = {"uid": "u42", "text": "hi i got watermarked", "slots": [0, 10, 20, 30, 39, 49, 59, 69, 79, 89, 99, 109, 118, 128, 138], "seg_dur": 4.0, "total_dur": 596.48, "render_seconds": 25.5, "n_renders": 15, "built_utc": "2026-09-04 23:18 UTC"};
+let SRCS = {
+  "master.u42.m3u8": BASE + "master.u42.m3u8",
+  "master.m3u8": BASE + "master.m3u8",
+  "orig": "https://stream.mux.com/ka2ee8rDp2R9SjZkvwyRNX8iUlVYL417Z400E14ilNfo.m3u8"
+};
+function updateBase(newBase) {
+  BASE = newBase;
+  SRCS["master.u42.m3u8"] = BASE + "master.u42.m3u8";
+  SRCS["master.m3u8"] = BASE + "master.m3u8";
+  // reload stats for new method
+  loadWmStats();
+  play(document.getElementById("src").value);
+}
+const v = document.getElementById("v");
+const status = document.getElementById("status");
+const logEl = document.getElementById("log");
+const lines = [];
+function log(msg, cls) {
+  const t = new Date().toISOString().slice(11, 23);
+  lines.push(`[${t}] ${msg}`);
+  if (lines.length > 300) lines.shift();
+  logEl.innerHTML = lines.map(l => {
+    const m = l.match(/^(\[[^\]]+\])\s+(\S+)\s?(.*)$/);
+    return m ? `${m[1]} <span class="${cls||""}">${m[2]}</span> ${m[3]}` : l;
+  }).join("\n");
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setStat(msg, cls) { status.textContent = msg; status.className = cls || ""; }
+let hls = null, n = 0;
+function ranges() {
+  const r = [];
+  for (let i = 0; i < v.buffered.length; i++)
+    r.push(v.buffered.start(i).toFixed(1) + "-" + v.buffered.end(i).toFixed(1));
+  return "[" + r.join(",") + "]";
+}
+// ---- watermark segments: parsed live from the u42 media playlist ----
+const wmStatsEl = document.getElementById("wmstats");
+const wmSel = document.getElementById("wm");
+const wmJumpBtn = document.getElementById("wmjump");
+const wmPrevBtn = document.getElementById("wmprev");
+const wmNextBtn = document.getElementById("wmnext");
+let wmSegs = [], wmTotal = 0;
+function fmtT(s) {
+  const m = Math.floor(s / 60), ss = s - m * 60;
+  return m + ":" + ss.toFixed(1).padStart(4, "0");
+}
+function wmEnable(on) {
+  wmSel.disabled = wmJumpBtn.disabled = wmPrevBtn.disabled = wmNextBtn.disabled = !on;
+}
+function renderWmStats() {
+  const wmDur = wmSegs.reduce((a, s) => a + s.dur, 0);
+  const pct = wmTotal ? (100 * wmDur / wmTotal) : 0;
+  const b = (typeof WM_BUILD !== "undefined") ? WM_BUILD : null;
+  wmStatsEl.innerHTML =
+    `Watermarked: <b>${wmSegs.length} segs · ${wmDur.toFixed(1)}s / ${wmTotal.toFixed(1)}s (${pct.toFixed(1)}%)</b>` +
+    (b ? ` · render took <b>${b.render_seconds}s</b> (${b.n_renders} variants)` : "") +
+    (b && b.text ? ` · “${b.text}”` : "");
+  wmSel.innerHTML = wmSegs.map((s, i) =>
+    `<option value="${i}">#${i + 1} @ ${fmtT(s.start)} (${s.dur.toFixed(1)}s)</option>`).join("");
+  wmEnable(wmSegs.length > 0);
+}
+function jumpWm(i) {
+  if (!wmSegs.length) return;
+  i = Math.max(0, Math.min(wmSegs.length - 1, i));
+  wmSel.value = String(i);
+  const target = Math.max(0, wmSegs[i].start - 1);
+  v.currentTime = target;
+  v.play().catch(() => {});
+  log(`WM-JUMP #${i + 1} wm@${wmSegs[i].start.toFixed(1)} -> t=${target.toFixed(1)}`, "g");
+}
+async function loadWmStats() {
+  // try the u42 master, then the base master (a missing u42 master must not be fatal)
+  let master = null, base = null, mrel = null, usedMaster = null;
+  for (const u of [SRCS["master.u42.m3u8"], SRCS["master.m3u8"]]) {
+    try {
+      const r = await fetch(u);
+      if (!r.ok) { log(`WM-STATS ${u.split("/").slice(-2).join("/")} -> HTTP ${r.status}, trying next`, "w"); continue; }
+      const t = await r.text();
+      if (!/EXT-X-STREAM-INF/.test(t)) continue;
+      const rel = t.split("\n").map(s => s.trim()).find(l => l && !l.startsWith("#") && /\.m3u8$/.test(l));
+      if (!rel) continue;
+      master = t; base = u.slice(0, u.lastIndexOf("/") + 1); mrel = rel; usedMaster = u;
+      break;
+    } catch (err) { continue; }
+  }
+  try {
+    if (!master) throw new Error("no playable master (u42 nor base)");
+    const pl = await (await fetch(base + mrel)).text();
+    let t = 0, pend = 0, frags = 0;
+    const segs = [];
+    for (const raw of pl.split("\n")) {
+      const l = raw.trim();
+      if (l.startsWith("#EXTINF:")) { pend = parseFloat(l.slice(8)) || 0; continue; }
+      if (!l || l.startsWith("#")) continue;
+      frags++;
+      if (/slots\/slot\d+/.test(l)) segs.push({ start: t, dur: pend, uri: l });
+      t += pend; pend = 0;
+    }
+    wmTotal = t;
+    if (!segs.length) {
+      // whole-file band methods (slice / tileonly / splice10): every frag carries the mark
+      if (frags && /u42/.test(mrel)) {
+        wmSegs = [];
+        wmStatsEl.innerHTML = `Watermarked: <b>full-video band (100% · ${frags} segs · ${t.toFixed(1)}s)</b> — no jump targets, mark is everywhere`;
+        wmSel.innerHTML = `<option>full video</option>`;
+        wmEnable(false);
+        log(`WM-STATS full-video band, ${frags} segs, ${t.toFixed(1)}s total`, "g");
+        return;
+      }
+      wmSegs = [];
+      wmStatsEl.textContent = "Watermarked: no watermarked segments in this playlist.";
+      wmEnable(false);
+      return;
+    }
+    wmSegs = segs;
+    renderWmStats();
+    log(`WM-STATS ${segs.length} watermarked segs, ${wmTotal.toFixed(1)}s total`, "g");
+  } catch (err) {
+    // fallback to embedded build stats when the playlist can't be fetched
+    const b = (typeof WM_BUILD !== "undefined") ? WM_BUILD : null;
+    if (b && b.slots && b.slots.length) {
+      wmSegs = b.slots.map(n => ({ start: n * b.seg_dur, dur: b.seg_dur, uri: "" }));
+      wmTotal = b.total_dur;
+      renderWmStats();
+      log(`WM-STATS fallback to build stats (${err})`, "w");
+    } else {
+      wmStatsEl.textContent = "watermark stats unavailable: " + err;
+    }
+  }
+}
+wmSel.addEventListener("change", () => jumpWm(+wmSel.value));
+wmJumpBtn.addEventListener("click", () => jumpWm(+wmSel.value));
+wmPrevBtn.addEventListener("click", () => jumpWm(+wmSel.value - 1));
+wmNextBtn.addEventListener("click", () => jumpWm(+wmSel.value + 1));
+loadWmStats();
+function playURL(url) {
+  document.getElementById("src").value = "master.u42.m3u8";
+  playDirect(url);
+}
+function play(sel) { playDirect(SRCS[sel]); }
+function playDirect(url) {
+  lines.length = 0; logEl.textContent = "";
+  try {
+    let hvcMSE = false, hvcNative = "";
+    try { hvcMSE = MediaSource.isTypeSupported('video/mp4;codecs="hvc1.1.6.L186.B0"'); } catch (err) {}
+    try { hvcNative = v.canPlayType('application/vnd.apple.mpegurl;codecs="hvc1"'); } catch (err) {}
+    log(`[ms] isTypeSupported f=${MediaSource.isTypeSupported('video/mp4;codecs="avc1.64001f"')}` +
+      ` F=${MediaSource.isTypeSupported('video/mp4;codecs="avc1.64001F"')}` +
+      ` aac=${MediaSource.isTypeSupported('audio/mp4;codecs="mp4a.40.2"')}` +
+      ` hvcMSE=${hvcMSE} hvcNative=${hvcNative}`);
+  } catch (err) { log(`[ms] hook threw ${err}`, "e"); }
+  log("LOAD " + url, "g");
+  setStat("loading " + url);
+  if (hls) { hls.destroy(); hls = null; }
+  if (window.Hls && Hls.isSupported()) {
+    hls = new Hls({ enableWorker: true });
+    hls.on(Hls.Events.MANIFEST_PARSED, (e, d) => {
+      try {
+        log(`MANIFEST levels=${d.levels.length} audioTracks=${d.audioTracks.length} firstLevel=${d.firstLevel}`, "g");
+        d.levels.forEach((l, i) => log(`level ${i}: ${(l.width||"?")}x${(l.height||"?")} ${l.codecs} ${String(l.url).split("/").slice(-2).join("/")}`));
+      } catch (err) { log("LOG-ERR " + err, "e"); }
+      v.play().catch(err => log("PLAY-BLOCKED " + err, "w"));
+    });
+    hls.on(Hls.Events.LEVEL_LOADED, (e, d) =>
+      log(`LEVEL-LOADED ${d.level} frags=${d.details.fragments.length} live=${d.details.live}`));
+    hls.on(Hls.Events.LEVEL_SWITCHED, (e, d) =>
+      log(`LEVEL-SWITCHED ${d.level}`));
+    hls.on(Hls.Events.AUDIO_TRACK_SWITCHING, (e, d) =>
+      log(`AUDIO-SWITCHING ${d.id} url=${(d.url || "").slice(-40)}`));
+    hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (e, d) =>
+      log(`AUDIO-SWITCHED ${d.id}`));
+    hls.on(Hls.Events.AUDIO_TRACK_LOADED, (e, d) =>
+      log(`AUDIO-LOADED frags=${d.details.fragments.length}`));
+    hls.on(Hls.Events.FRAG_LOADING, (e, d) => {
+      if (d.frag.sn === "initSegment" || d.frag.sn < 3) log(`FRAG-LOADING ${d.frag.type} sn=${d.frag.sn} url=...${String(d.frag.url).slice(-48)}`);
+    });
+    hls.on(Hls.Events.FRAG_LOADED, (e, d) => {
+      if (d.frag.sn === "initSegment" || d.frag.sn < 3) {
+        const nd = d.networkDetails || {};
+        log(`FRAG-LOADED ${d.frag.type} sn=${d.frag.sn} bytes=${d.payload && d.payload.byteLength} payloadType=${d.payload && d.payload.constructor && d.payload.constructor.name} xhrStatus=${nd.status} loaded=${nd.loaded} total=${nd.total}`);
+      }
+    });
+    hls.on(Hls.Events.FRAG_PARSED, (e, d) => {
+      if (d.frag.sn < 3) log(`FRAG-PARSED ${d.frag.type} sn=${d.frag.sn}`);
+    });
+    hls.on(Hls.Events.BUFFER_CODECS, (e, d) =>
+      log(`BUFFER-CODECS ${d.tracks ? Object.keys(d.tracks).join(",") : "?"}`));
+    hls.on(Hls.Events.BUFFER_CREATED, (e, d) =>
+      log(`BUFFER-CREATED ${Object.keys(d.tracks).join(",")}`));
+    hls.on(Hls.Events.BUFFER_APPENDING, (e, d) =>
+      log(`APPENDING type=${d.type} parent=${d.parent} bytes=${d.data && d.data.byteLength} fragsn=${d.frag && d.frag.sn}`));
+    try {
+      const _add = MediaSource.prototype.addSourceBuffer;
+      if (!_add.__wm2ts) {
+        const hooked = function (mime) {
+          const sb = _add.call(this, mime);
+          const _app = sb.appendBuffer.bind(sb);
+          const short = mime.split(";")[0].split("/")[1];
+          sb.appendBuffer = function (data) {
+            if (data.byteLength < 2000 || (window.__wm2tsN = (window.__wm2tsN || 0) + 1) <= 6)
+              log(`[sb] append ${short} ${data.byteLength}B tsOffset=${sb.timestampOffset}`);
+            return _app(data);
+          };
+          hooked.__wm2ts = true;
+          MediaSource.prototype.addSourceBuffer = hooked;
+          return sb;
+        };
+        MediaSource.prototype.addSourceBuffer = hooked;
+      }
+    } catch (err) { log(`[sb] hook threw ${err}`, "e"); }
+    hls.on(Hls.Events.FRAG_BUFFERED, (e, d) => {
+      n++;
+      if (d.frag.discontinuity || d.frag.sn < 3 || n % 40 === 0)
+        log(`FRAG-BUFFERED ${d.frag.type} sn=${d.frag.sn} cc=${d.frag.cc} start=${d.frag.start.toFixed(1)} t=${v.currentTime.toFixed(1)} buf=${ranges()}`);
+    });
+    hls.on(Hls.Events.FRAG_PARSING_INIT_SEGMENT, (e, d) =>
+      log(`INIT-TRACKS id=${d.id} sn=${d.frag.sn} tracks=${d.tracks ? Object.keys(d.tracks).join(",") : "?"}` +
+        (d.tracks && d.tracks.video ? ` vcodec=${d.tracks.video.codec}` : "") +
+        (d.tracks && d.tracks.audio ? ` acodec=${d.tracks.audio.codec}` : "")));
+    hls.on(Hls.Events.FRAG_PARSING_DATA, (e, d) => {
+      if (d.frag.sn === "initSegment" || d.frag.sn < 2)
+        log(`PARSING-DATA id=${d.id} sn=${d.frag.sn} hasAudio=${!!(d.data1||d.data2)}`);
+    });
+    hls.on(Hls.Events.INIT_PTS_FOUND, (e, d) =>
+      log(`INIT-PTS sn=${d.frag?.sn} pts=${d.initPTS} timescale=${d.timescale}`));
+    hls.on(Hls.Events.ERROR, (e, d) => {
+      const extra = [];
+      if (d.event) extra.push("event=" + d.event);
+      const em = d.error && d.error.message ? d.error.message : (d.err ? String(d.err).slice(0,160) : "-");
+      extra.push("msg=" + em);
+      const st = d.error && d.error.stack ? String(d.error.stack).split("\n").slice(0,4).join(" | ") : "";
+      if (st) extra.push("stack=" + st);
+      log(`ERROR fatal=${d.fatal} type=${d.type} details=${d.details} sn=${d.frag?d.frag.sn:"?"} resp=${d.response?d.response.code+(d.response.url?" "+d.response.url.slice(-60):""):"-"} ${extra.join(" ")}`, "e");
+      // a missing per-user master must not be fatal: fall back to the base master once
+      if (d.fatal && d.details === "manifestLoadError" && /master\.u42\.m3u8$/.test(url) && !playDirect._u42fb) {
+        playDirect._u42fb = true;
+        log("FALLBACK base master.m3u8 (u42 master missing)", "w");
+        setTimeout(() => { playDirect._u42fb = false; playDirect(SRCS["master.m3u8"]); }, 300);
+        return;
+      }
+      if (d.fatal) setStat("fatal: " + d.type + " / " + d.details, "err");
+    });
+    ["playing","waiting","stalled","emptied","seeking","seeked"].forEach(ev =>
+      v.addEventListener(ev, () => log(`VIDEO-${ev.toUpperCase()} t=${v.currentTime.toFixed(2)} buf=${ranges()}`,
+        ev === "playing" ? "g" : "w")));
+    v.addEventListener("error", () => log("VIDEO-ERROR code=" + v.error?.code, "e"));
+    setInterval(() => {
+      setStat(`t=${v.currentTime.toFixed(1)}s readyState=${v.readyState} paused=${v.paused} buf=${ranges()}`);
+    }, 1000);
+    hls.loadSource(url);
+    hls.attachMedia(v);
+  } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
+    v.src = url;
+    v.play().catch(()=>{});
+  } else {
+    setStat("hls.js not supported in this browser", "err");
+  }
+}
+document.getElementById("src").addEventListener("change", e => play(e.target.value));
+document.getElementById("method").addEventListener("change", e => updateBase(e.target.value));
+document.getElementById("copy").addEventListener("click", () => {
+  navigator.clipboard.writeText(lines.join("\n")).then(() => setStat("log copied", "ok"));
+});
+const q = new URLSearchParams(location.search).get("src");
+const qMethod = new URLSearchParams(location.search).get("method");
+if (qMethod) {
+  const sel = document.getElementById("method");
+  for (let o of sel.options) if (qMethod === o.value || o.text.includes(qMethod)) { sel.value = o.value; updateBase(o.value); break; }
+}
+if (q && (SRCS[q] || q.startsWith("http"))) {
+  const url = SRCS[q] || q;
+  if (SRCS[q]) document.getElementById("src").value = q;
+  playURL(url);
+} else play("master.u42.m3u8");
+</script>
+</body>
+</html>
