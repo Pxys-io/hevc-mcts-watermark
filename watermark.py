@@ -45,15 +45,16 @@ def cmd_init(a):
     dur = float(subprocess.run(f'ffprobe -v error -show_entries format=duration -of csv=p=0 "{src}"',
                                shell=True, capture_output=True, text=True, check=True).stdout.strip())
     n = int(dur * FPS)
-    yuv = f"{a.store}/src.yuv"
-    print(f"decode {dur:.0f}s to raw (one-time)...", flush=True)
-    sh(f'ffmpeg -v error -y -i "{src}" -vf "scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2" -pix_fmt yuv420p -f rawvideo "{yuv}"')
+    # NOTE: stream decode straight into kvazaar stdin. A full-length raw dump
+    # would be ~238 GB at 720p/2h (vs 46 GB disks) — never write src.yuv.
     master = f"{a.store}/asset/master.266"
     t0 = time.time()
-    sh(["kvazaar", "-i", yuv, "--input-res", f"{W}x{H}", "--input-fps", str(FPS),
-        "-o", master] + tileflags() +
-        ["-q", str(QP), "--preset", PRESET,
-         "-p", str(GOP), "--no-open-gop"])
+    print(f"streaming {dur:.0f}s: ffmpeg -> kvazaar (one-time)...", flush=True)
+    kv = (["kvazaar", "-i", "-", "--input-res", f"{W}x{H}", "--input-fps", str(FPS),
+           "-o", master] + tileflags() +
+          ["-q", str(QP), "--preset", PRESET, "-p", str(GOP), "--no-open-gop",
+           "-n", str(n)])
+    sh(f'ffmpeg -v error -i "{src}" -vf "scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2" -pix_fmt yuv420p -f rawvideo - | {" ".join(kv)}')
     print(f"tiled encode {time.time()-t0:.0f}s", flush=True)
     hvc = f"{a.store}/asset/master.hvc"
     shutil.copy(master, hvc)
