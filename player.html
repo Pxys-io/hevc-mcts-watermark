@@ -212,7 +212,10 @@ function playDirect(url) {
   setStat("loading " + url);
   if (hls) { hls.destroy(); hls = null; }
   if (window.Hls && Hls.isSupported()) {
-    hls = new Hls({ enableWorker: true });
+    hls = new Hls({ enableWorker: true,
+      // our fMP4 junctions have ~0.1-0.2 s rounding holes (packaging, not corruption):
+      // hop anything sub-half-second silently instead of stalling on it
+      maxBufferHole: 0.5 });
     hls.on(Hls.Events.MANIFEST_PARSED, (e, d) => {
       try {
         log(`MANIFEST levels=${d.levels.length} audioTracks=${d.audioTracks.length} firstLevel=${d.firstLevel}`, "g");
