@@ -105,8 +105,8 @@ def cmd_user(a):
         # NOTE: no --tiles/--no-wpp here on purpose: plain encode keeps wavefront
         # parallelism (~2x faster than tiled band encodes) and halves bitrate.
         sh(["kvazaar", "-i", f"{tmp}/slot_user.yuv", "--input-res", f"{W}x{H}",
-            "--input-fps", str(FPS), "-o", f"{tmp}/slot_user.266",
-            "-q", str(QP), "--preset", PRESET, "-p", str(GOP), "--no-open-gop"])
+            "--input-fps", str(FPS), "-o", f"{tmp}/slot_user.266"] + tileflags +
+            ["-q", str(QP), "--preset", PRESET, "-p", str(GOP), "--no-open-gop"])
         sh([a.mp4box_bin, "-add", f"{tmp}/slot_user.266", "-new", "-quiet", f"{tmp}/slot_user.mp4"])
         ht = f"{tmp}/hls_{i}"; os.makedirs(ht, exist_ok=True)
         sh([a.gpac_bin, "-i", f"{tmp}/slot_user.mp4", "-o", f"{ht}/slot.m3u8:dur=9999"])
