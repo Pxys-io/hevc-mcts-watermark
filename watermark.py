@@ -77,7 +77,6 @@ def cmd_init(a):
         try: os.remove(f"{d}/{f}")
         except OSError: pass
     json.dump(dict(w=W, h=H, fps=FPS, seg_dur=SEG_DUR, duration=dur, segments=len(segs),
-              fps_src="29.97->30" if FPS==30 else "native",
               tiles=TILES, qp=QP, preset=PRESET),
               open(f"{a.store}/base.json", "w"), indent=1)
     print(f"store ready: {len(segs)} segments", flush=True)
