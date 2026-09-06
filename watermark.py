@@ -14,10 +14,12 @@ Decoders: HEVC-capable players (Safari, Chrome+HW, FF 134+). H.264 shops: use sl
 """
 import argparse, hashlib, json, math, os, random, re, shutil, subprocess, sys, time
 
-W, H, FPS, SEG_DUR = 640, 360, 24, 4.0
-TILES, QP, PRESET, GOP = "1x3", 26, "fast", int(24 * 4.0)
-TILEFLAGS = (["--tiles", TILES, "--slices", "tiles",
-              "--mv-constraint", "frametile"] if TILES else [])
+FPS, SEG_DUR = 24, 4.0
+W, H, TILES, QP, PRESET = 640, 360, "1x3", 26, "fast"
+GOP = int(FPS * SEG_DUR)
+def tileflags():
+    return (["--tiles", TILES, "--slices", "tiles",
+             "--mv-constraint", "frametile"] if TILES else [])
 # NOTE 2026-09-06: plain (single-tile) master is the default. Tiles only
 # exist for tile-swap experiments; they cost ~2x bitrate and are NOT
 # needed for span-swap (re-encode 10% spans + manifest swap).
@@ -49,7 +51,7 @@ def cmd_init(a):
     master = f"{a.store}/asset/master.266"
     t0 = time.time()
     sh(["kvazaar", "-i", yuv, "--input-res", f"{W}x{H}", "--input-fps", str(FPS),
-        "-o", master] + TILEFLAGS +
+        "-o", master] + tileflags() +
         ["-q", str(QP), "--preset", PRESET,
          "-p", str(GOP), "--no-open-gop"])
     print(f"tiled encode {time.time()-t0:.0f}s", flush=True)
@@ -74,7 +76,8 @@ def cmd_init(a):
     for f in ("hls.m3u8", "hls_1.m3u8"):
         try: os.remove(f"{d}/{f}")
         except OSError: pass
-    json.dump(dict(w=W, h=H, fps=FPS, seg_dur=SEG_DUR, duration=dur, segments=len(segs)),
+    json.dump(dict(w=W, h=H, fps=FPS, seg_dur=SEG_DUR, duration=dur, segments=len(segs),
+              tiles=TILES, qp=QP, preset=PRESET),
               open(f"{a.store}/base.json", "w"), indent=1)
     print(f"store ready: {len(segs)} segments", flush=True)
 
@@ -106,7 +109,7 @@ def cmd_user(a):
         # swaps mid-stream, and an untiled SPS trips decoder re-init -> visible
         # corruption at slot boundaries (seen live, Sep 2026). Do not "optimize".
         sh(["kvazaar", "-i", f"{tmp}/slot_user.yuv", "--input-res", f"{W}x{H}",
-            "--input-fps", str(FPS), "-o", f"{tmp}/slot_user.266"] + TILEFLAGS +
+            "--input-fps", str(FPS), "-o", f"{tmp}/slot_user.266"] + tileflags() +
             ["-q", str(QP), "--preset", PRESET, "-p", str(GOP), "--no-open-gop"])
         sh([a.mp4box_bin, "-add", f"{tmp}/slot_user.266", "-new", "-quiet", f"{tmp}/slot_user.mp4"])
         ht = f"{tmp}/hls_{i}"; os.makedirs(ht, exist_ok=True)
@@ -221,12 +224,26 @@ def main():
     ap.add_argument("--gpac-bin", default="gpac"); ap.add_argument("--mp4box-bin", default="MP4Box")
     sub = ap.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("init"); i.add_argument("--src", required=True); i.add_argument("--store", required=True)
+    i.add_argument("--width", type=int, default=640); i.add_argument("--height", type=int, default=360)
+    i.add_argument("--tiles", default="1x3"); i.add_argument("--qp", type=int, default=26)
     u = sub.add_parser("user"); u.add_argument("--store", required=True); u.add_argument("--text", required=True)
     u.add_argument("--uid", required=True); u.add_argument("--frac", type=float, default=0.10)
     u.add_argument("--seed", default=None, help="slot picker seed (default: uid)")
     u.add_argument("--out", required=True); u.add_argument("--upload", action="store_true")
     a = ap.parse_args()
-    (cmd_init if a.cmd == "init" else cmd_user)(a)
+    global W, H, TILES, QP
+    if a.cmd == "init":
+        W, H, TILES, QP = a.width, a.height, a.tiles, a.qp
+        cmd_init(a)
+    else:
+        global TILES, QP, PRESET
+        try:
+            import json as _j
+            meta = _j.load(open(f"{a.store}/base.json"))
+            W, H, TILES, QP, PRESET = meta["w"], meta["h"], meta.get("tiles", TILES), meta.get("qp", QP), meta.get("preset", PRESET)
+        except Exception:
+            pass
+        cmd_user(a)
 
 if __name__ == "__main__":
     main()
