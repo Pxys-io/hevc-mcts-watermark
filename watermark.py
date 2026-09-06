@@ -116,6 +116,35 @@ def cmd_user(a):
         inits = [f for f in os.listdir(ht) if "init" in f and f.endswith(".mp4")]
         shutil.move(f"{ht}/{um4s[0]}", f"{slotdir}/seg.m4s")
         shutil.copy(f"{ht}/{inits[0]}", f"{slotdir}/init.mp4")
+        # tfdt alignment: the standalone-packaged slot seg carries tfdt=0 while
+        # shared segs carry absolute timeline values. A 0-based slot after a
+        # discontinuity misleads hls.js offset math (~0.125 s hole at slot exit,
+        # seen live). Patch the slot tfdt (v0, same size) to the shared value.
+        import struct as _st
+        def _tfdt(path):
+            d = open(path, "rb").read(); i = 0
+            while i + 8 <= len(d):
+                n = _st.unpack(">I", d[i:i+4])[0]; t2 = d[i+4:i+8]
+                if t2 == b"moof":
+                    j = i + 8
+                    while j + 8 <= i + n:
+                        m = _st.unpack(">I", d[j:j+4])[0]; t3 = d[j+4:j+8]
+                        if t3 == b"traf":
+                            k = j + 8
+                            while k + 8 <= j + m:
+                                q = _st.unpack(">I", d[k:k+4])[0]; t4 = d[k+4:k+8]
+                                if t4 == b"tfdt":
+                                    assert d[k+8] == 0, "tfdt v1 needs 8-byte patch"
+                                    return k + 12, _st.unpack(">I", d[k+12:k+16])[0]
+                                k += q if q > 0 else (j + m - k)
+                        j += m if m > 0 else (i + n - j)
+                i += n if n > 0 else len(d)
+            raise RuntimeError("no tfdt in " + path)
+        _off, _want = _tfdt(f"{d}/seg_{i:04d}.m4s")[0], _tfdt(f"{d}/seg_{i:04d}.m4s")[1]
+        _o2, _ = _tfdt(f"{slotdir}/seg.m4s")
+        _b = bytearray(open(f"{slotdir}/seg.m4s", "rb").read())
+        _st.pack_into(">I", _b, _o2, _want)
+        open(f"{slotdir}/seg.m4s", "wb").write(_b)
     # per-user manifest: shared segs + disco/MAP slot swaps (fMP4, same codec)
     out, pending, seg_re = [], None, re.compile(r"^seg_(\d{4})\.m4s$")
     slots = set(idxs)
