@@ -1,10 +1,9 @@
 # hevc-mcts-watermark
 
-Per-user **visible** watermarks on HEVC **MCTS-tiled** video: the frame is
-coded as 3 independent horizontal tiles (`--tiles 1x3 --slices tiles
---mv-constraint frametile`, closed GOP); per user, 10% of the segments
-("slots") are re-encoded with bottom-band text and swapped in via the HLS
-manifest (discontinuity + per-slot init). 90% of segments are shared.
+Per-user **visible** watermarks on HEVC video, fMP4/HLS: per user, 10% of
+the segments ("slots") are re-encoded with bottom-band text and swapped in
+via the manifest (discontinuity + per-slot init). 90% of segments are shared,
+re-encoded spans only — no full transcode, no tiles required.
 
 - **Encoder:** kvazaar (tiled HEVC) + GPAC/MP4Box (fMP4/HLS packaging).
 - **Packaging:** fMP4/CMAF HLS throughout (MPEG-TS transmux chokes at scale).
@@ -15,7 +14,9 @@ manifest (discontinuity + per-slot init). 90% of segments are shared.
 ## Quickstart
 
 ```bash
-# one-time per video (~3.5 min for 10 min source at 640x360)
+# one-time per video, PLAIN master by default (single-tile: ~2x smaller than
+# tiled, plays on dumber decoders). --tiles opts into the MCTS tiled master
+# (experiments only — see below).
 python watermark.py init --src bbb.mp4 --store store/ \
     --gpac-bin /path/to/gpac --mp4box-bin /path/to/MP4Box
 
@@ -35,7 +36,11 @@ https://github.com/gpac/gpac.git, `./configure && make -j8`, pass `--gpac-bin`
 
 ## Honest status
 
-- **Shipped path (this wrapper): full re-encode of slot segments.** Top tiles
+- **Shipped path (this wrapper): plain master + full re-encode of 10% slot
+  spans.** Tiles were measured at ~2x bitrate (178 KB vs 350 KB per 10 s) for
+  zero delivery benefit under span-swap, so they are OFF by default; slot
+  encodes keep wavefront parallelism (~0.8 s/4 s span).
+- Top video outside the band
   are NOT bit-identical (generation loss, small invisible deltas); only the
   band carries the mark. ~26 s per unique string on 10 min video, 0 s per view
   after (plain HLS).

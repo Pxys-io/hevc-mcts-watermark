@@ -16,6 +16,9 @@ import argparse, json, math, os, re, shutil, subprocess, sys, time
 
 W, H, FPS, SEG_DUR = 640, 360, 24, 4.0
 TILES, QP, PRESET, GOP = "1x3", 26, "fast", int(24 * 4.0)
+# NOTE 2026-09-06: plain (single-tile) master is the default. Tiles only
+# exist for tile-swap experiments; they cost ~2x bitrate and are NOT
+# needed for span-swap (re-encode 10% spans + manifest swap).
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -41,14 +44,16 @@ def cmd_init(a):
     yuv = f"{a.store}/src.yuv"
     print(f"decode {dur:.0f}s to raw (one-time)...", flush=True)
     sh(f'ffmpeg -v error -y -i "{src}" -vf scale={W}:{H} -pix_fmt yuv420p -f rawvideo "{yuv}"')
-    master = f"{a.store}/asset/master_tiled.266"
+    master = f"{a.store}/asset/master.266"
     t0 = time.time()
+    tileflags = (["--tiles", TILES, "--slices", "tiles",
+                  "--mv-constraint", "frametile"] if a.tiles else [])
     sh(["kvazaar", "-i", yuv, "--input-res", f"{W}x{H}", "--input-fps", str(FPS),
-        "-o", master, "--tiles", TILES, "--slices", "tiles",
-        "--mv-constraint", "frametile", "-q", str(QP), "--preset", PRESET,
-        "-p", str(GOP), "--no-open-gop"])
+        "-o", master] + tileflags +
+        ["-q", str(QP), "--preset", PRESET,
+         "-p", str(GOP), "--no-open-gop"])
     print(f"tiled encode {time.time()-t0:.0f}s", flush=True)
-    hvc = f"{a.store}/asset/master_tiled.hvc"
+    hvc = f"{a.store}/asset/master.hvc"
     shutil.copy(master, hvc)
     d = f"{a.store}/asset/rend0"
     sh([a.gpac_bin, "-i", hvc, "-o", f"{d}/hls.m3u8:dur={SEG_DUR}"])
@@ -93,9 +98,10 @@ def cmd_user(a):
            f'drawtext=fontfile={FONT}:text=\'{a.text}\':fontsize={th//4}:fontcolor=white:'
            f'x=(w-tw)/2:y={ty}+({th}-th)/2" '
            f'-pix_fmt yuv420p -f rawvideo "{tmp}/slot_user.yuv"')
+        # NOTE: no --tiles/--no-wpp here on purpose: plain encode keeps wavefront
+        # parallelism (~2x faster than tiled band encodes) and halves bitrate.
         sh(["kvazaar", "-i", f"{tmp}/slot_user.yuv", "--input-res", f"{W}x{H}",
             "--input-fps", str(FPS), "-o", f"{tmp}/slot_user.266",
-            "--tiles", TILES, "--slices", "tiles", "--mv-constraint", "frametile",
             "-q", str(QP), "--preset", PRESET, "-p", str(GOP), "--no-open-gop"])
         sh([a.mp4box_bin, "-add", f"{tmp}/slot_user.266", "-new", "-quiet", f"{tmp}/slot_user.mp4"])
         ht = f"{tmp}/hls_{i}"; os.makedirs(ht, exist_ok=True)
@@ -157,6 +163,7 @@ def main():
     ap.add_argument("--gpac-bin", default="gpac"); ap.add_argument("--mp4box-bin", default="MP4Box")
     sub = ap.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("init"); i.add_argument("--src", required=True); i.add_argument("--store", required=True)
+    i.add_argument("--tiles", action="store_true", help="MCTS tiled master (experiments only)")
     u = sub.add_parser("user"); u.add_argument("--store", required=True); u.add_argument("--text", required=True)
     u.add_argument("--uid", required=True); u.add_argument("--frac", type=float, default=0.10)
     u.add_argument("--out", required=True); u.add_argument("--upload", action="store_true")
