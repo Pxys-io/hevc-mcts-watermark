@@ -47,7 +47,7 @@ def cmd_init(a):
     n = int(dur * FPS)
     yuv = f"{a.store}/src.yuv"
     print(f"decode {dur:.0f}s to raw (one-time)...", flush=True)
-    sh(f'ffmpeg -v error -y -i "{src}" -vf scale={W}:{H} -pix_fmt yuv420p -f rawvideo "{yuv}"')
+    sh(f'ffmpeg -v error -y -i "{src}" -vf "scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2" -pix_fmt yuv420p -f rawvideo "{yuv}"')
     master = f"{a.store}/asset/master.266"
     t0 = time.time()
     sh(["kvazaar", "-i", yuv, "--input-res", f"{W}x{H}", "--input-fps", str(FPS),
@@ -77,6 +77,7 @@ def cmd_init(a):
         try: os.remove(f"{d}/{f}")
         except OSError: pass
     json.dump(dict(w=W, h=H, fps=FPS, seg_dur=SEG_DUR, duration=dur, segments=len(segs),
+              fps_src="29.97->30" if FPS==30 else "native",
               tiles=TILES, qp=QP, preset=PRESET),
               open(f"{a.store}/base.json", "w"), indent=1)
     print(f"store ready: {len(segs)} segments", flush=True)
@@ -226,6 +227,7 @@ def main():
     i = sub.add_parser("init"); i.add_argument("--src", required=True); i.add_argument("--store", required=True)
     i.add_argument("--width", type=int, default=640); i.add_argument("--height", type=int, default=360)
     i.add_argument("--tiles", default="1x3"); i.add_argument("--qp", type=int, default=26)
+    i.add_argument("--fps", type=int, default=24)
     u = sub.add_parser("user"); u.add_argument("--store", required=True); u.add_argument("--text", required=True)
     u.add_argument("--uid", required=True); u.add_argument("--frac", type=float, default=0.10)
     u.add_argument("--seed", default=None, help="slot picker seed (default: uid)")
@@ -233,7 +235,9 @@ def main():
     a = ap.parse_args()
     global W, H, TILES, QP
     if a.cmd == "init":
+        global FPS, GOP
         W, H, TILES, QP = a.width, a.height, a.tiles, a.qp
+        FPS, GOP = a.fps, int(a.fps * SEG_DUR)
         cmd_init(a)
     else:
         global TILES, QP, PRESET
