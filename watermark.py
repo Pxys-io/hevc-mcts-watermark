@@ -12,7 +12,7 @@ Tile-only band swap is documented as experimental (see README + inject_srd.py).
 Requires: kvazaar, ffmpeg, gpac/MP4Box (--gpac-bin/--mp4box-bin or PATH).
 Decoders: HEVC-capable players (Safari, Chrome+HW, FF 134+). H.264 shops: use slice16 repo.
 """
-import argparse, json, math, os, re, shutil, subprocess, sys, time
+import argparse, hashlib, json, math, os, random, re, shutil, subprocess, sys, time
 
 W, H, FPS, SEG_DUR = 640, 360, 24, 4.0
 TILES, QP, PRESET, GOP = "1x3", 26, "fast", int(24 * 4.0)
@@ -82,7 +82,11 @@ def cmd_user(a):
     meta = json.load(open(f"{a.store}/base.json"))
     d = f"{a.store}/asset/rend0"
     n_slots = math.ceil(meta["segments"] * a.frac)
-    idxs = sorted({round(j * meta["segments"] / n_slots) for j in range(n_slots)})
+    # seeded pick: different users get different times (default seed=uid).
+    # string-hash dedupes renders: same seed+text reuses the same slots.
+    seed = a.seed if a.seed else a.uid
+    rng = random.Random(int(hashlib.sha256(seed.encode()).hexdigest(), 16))
+    idxs = sorted(rng.sample(range(meta["segments"]), min(n_slots, meta["segments"])))
     tw, th, ty = W, H // 3, H - H // 3
     tmp = f"{a.store}/slot_work"; os.makedirs(tmp, exist_ok=True)
     t0 = time.time()
@@ -118,6 +122,13 @@ def cmd_user(a):
         l = line.strip()
         if l.startswith("#EXTINF:"): pending = l; continue
         m = seg_re.match(l)
+        if m and int(m.group(1)) not in slots:
+            # shared segment: keep its EXTINF + uri (dropping EXTINF shortens
+            # the timeline to slots only — seen live as 60 s instead of 596 s)
+            if pending is not None:
+                out.append(pending); pending = None
+            out.append(l)
+            continue
         if m and int(m.group(1)) in slots:
             sn = int(m.group(1))
             out += ["#EXT-X-DISCONTINUITY", f'#EXT-X-MAP:URI="slots/slot{sn:04d}/{a.uid}/init.mp4"',
@@ -138,7 +149,7 @@ def cmd_user(a):
     # player render (copy, never in place): relative BASE for local http serving
     dt = time.time() - t0
     tpl = open(os.path.join(HERE, "player.html")).read()
-    wm = {"uid": a.uid, "text": a.text, "slots": idxs, "seg_dur": SEG_DUR,
+    wm = {"uid": a.uid, "seed": seed, "text": a.text, "slots": idxs, "seg_dur": SEG_DUR,
           "total_dur": meta["duration"], "render_seconds": round(dt, 1),
           "n_renders": len(idxs),
           "built_utc": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())}
@@ -166,6 +177,7 @@ def main():
     i.add_argument("--tiles", action="store_true", help="MCTS tiled master (experiments only)")
     u = sub.add_parser("user"); u.add_argument("--store", required=True); u.add_argument("--text", required=True)
     u.add_argument("--uid", required=True); u.add_argument("--frac", type=float, default=0.10)
+    u.add_argument("--seed", default=None, help="slot picker seed (default: uid)")
     u.add_argument("--out", required=True); u.add_argument("--upload", action="store_true")
     a = ap.parse_args()
     (cmd_init if a.cmd == "init" else cmd_user)(a)
