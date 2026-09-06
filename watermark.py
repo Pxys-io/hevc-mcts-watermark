@@ -220,6 +220,7 @@ def cmd_user(a):
         print("(upload: wire your prefix walk here — see README)", flush=True)
 
 def main():
+    global W, H, TILES, QP, PRESET, FPS, GOP
     ap = argparse.ArgumentParser()
     ap.add_argument("--gpac-bin", default="gpac"); ap.add_argument("--mp4box-bin", default="MP4Box")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -234,12 +235,10 @@ def main():
     a = ap.parse_args()
     global W, H, TILES, QP
     if a.cmd == "init":
-        global FPS, GOP
         W, H, TILES, QP = a.width, a.height, a.tiles, a.qp
         FPS, GOP = a.fps, int(a.fps * SEG_DUR)
         cmd_init(a)
     else:
-        global TILES, QP, PRESET
         try:
             import json as _j
             meta = _j.load(open(f"{a.store}/base.json"))
