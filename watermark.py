@@ -54,7 +54,12 @@ def cmd_init(a):
            "-o", master] + tileflags() +
           ["-q", str(QP), "--preset", PRESET, "-p", str(GOP), "--no-open-gop",
            "-n", str(n)])
-    sh(f'ffmpeg -v error -i "{src}" -vf "scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2" -pix_fmt yuv420p -f rawvideo - | {" ".join(kv)}')
+    # stream (not sh(): capture would swallow kvazaar's progress for hours)
+    r = subprocess.run(
+        f'ffmpeg -v error -i "{src}" -vf "scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2" -pix_fmt yuv420p -f rawvideo - | {" ".join(kv)}',
+        shell=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"encode pipeline failed rc={r.returncode}")
     print(f"tiled encode {time.time()-t0:.0f}s", flush=True)
     hvc = f"{a.store}/asset/master.hvc"
     shutil.copy(master, hvc)
