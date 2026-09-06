@@ -145,6 +145,23 @@ def cmd_user(a):
         _b = bytearray(open(f"{slotdir}/seg.m4s", "rb").read())
         _st.pack_into(">I", _b, _o2, _want)
         open(f"{slotdir}/seg.m4s", "wb").write(_b)
+        # elst fix: gpac single-seg packaging writes edts/elst media_time=3000
+        # (skip first 0.125 s) into per-slot inits; shared init has no elst.
+        # hls.js honors it -> 0.125 s hole after every slot. Zero it in place.
+        _ib = bytearray(open(f"{slotdir}/init.mp4", "rb").read())
+        _stack = [(0, len(_ib))]
+        while _stack:
+            _lo, _hi = _stack.pop(); _j = _lo
+            while _j + 8 <= _hi:
+                _n = _st.unpack(">I", _ib[_j:_j+4])[0]; _t = bytes(_ib[_j+4:_j+8])
+                if _n <= 0: _n = _hi - _j
+                if _t == b"elst":
+                    assert _ib[_j+8] == 0 and _st.unpack(">I", _ib[_j+12:_j+16])[0] == 1
+                    _st.pack_into(">i", _ib, _j+20, 0)
+                if _t in (b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts"):
+                    _stack.append((_j+8, _j+_n))
+                _j += _n
+        open(f"{slotdir}/init.mp4", "wb").write(_ib)
     # per-user manifest: shared segs + disco/MAP slot swaps (fMP4, same codec)
     out, pending, seg_re = [], None, re.compile(r"^seg_(\d{4})\.m4s$")
     slots = set(idxs)
