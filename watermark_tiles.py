@@ -18,7 +18,9 @@ import argparse, base64, hashlib, json, math, os, random, shutil, subprocess, sy
 FPS, SEG_DUR, QP, PRESET = 24, 4.0, 26, "fast"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-def sh(cmd, shell=False):
+def sh(cmd, shell=None):
+    if shell is None:
+        shell = isinstance(cmd, str)
     r = subprocess.run(cmd, shell=shell, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"fail {cmd}\n{r.stderr[-1500:]}")
@@ -74,39 +76,76 @@ def cmd_user(a):
     FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     tmp = f"{a.store}/work_{a.uid}"; os.makedirs(tmp, exist_ok=True)
     t0 = time.time()
-    # 1. crop band over picked segments only -> overlay -> kvazaar
-    pick_expr = "+".join(f"between(n\\,{s*gop}\\,{min((s+1)*gop-1, meta['frames']-1)})" for s in slots)
-    sh(f'ffmpeg -v error -y -i {d}/band.yuv -vf "select=\'{pick_expr}\','
-       f'drawbox=c=black@0.6:t=fill,drawtext=fontfile={FONT}:text=\'{a.text}\':'
-       f'fontsize={band_h//2}:fontcolor=white:x=(w-tw)/2:y=(h-th)/2" '
-       f'-pix_fmt yuv420p -f rawvideo {tmp}/band_user.yuv')
+    # 1. extract picked slots from band.yuv by byte-offset (rawvideo = seek math),
+    #    then overlay text in a filter pass (no select filter involved)
+    FRB = W * band_h * 3 // 2
+    t0 = time.time()
+    with open(f"{d}/band.yuv", "rb") as f, open(f"{tmp}/picked.yuv", "wb") as o:
+        for s in slots:
+            f.seek(s * gop * FRB)
+            o.write(f.read(gop * FRB))
+    vf = (f"drawbox=c=black@0.6:t=fill,"
+          f"drawtext=fontfile={FONT}:text='{a.text}':fontsize={band_h//2}:"
+          f"fontcolor=white:x=(w-tw)/2:y=(h-th)/2")
+    sh(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        "-s", f"{W}x{band_h}", "-r", str(fps), "-i", f"{tmp}/picked.yuv",
+        "-vf", vf, "-pix_fmt", "yuv420p", "-f", "rawvideo", f"{tmp}/band_user.yuv"])
     sh(["kvazaar", "-i", f"{tmp}/band_user.yuv", "--input-res", f"{W}x{band_h}",
         "--input-fps", str(fps), "-o", f"{tmp}/band_user.266",
         "-q", str(meta["qp"]), "--preset", meta["preset"], "-p", str(gop),
         "--no-open-gop", "--no-wpp", "--no-tmvp"])
     sh([a.mp4box, "-add", f"{tmp}/band_user.266", "-new", "-quiet", f"{tmp}/band_user.mp4"])
-    # 2. merge: static tiles + user band
-    add = " ".join(f"-add {d}/t{k}.mp4" for k in range(1, N))
-    sh([a.mp4box] + add.split() + [f"-add", f"{tmp}/band_user.mp4", "-new", "-quiet", f"{tmp}/merged.mp4"])
-    sh(["python3", os.path.join(HERE, "inject_srd.py"), f"{tmp}/merged.mp4",
-        f"{tmp}/merged_srd.mp4", "0", str(band_y), str(W), str(H)])
-    sh([a.gpac, "-i", f"{tmp}/merged_srd.mp4", "hevcmerge", "-o", f"{tmp}/merged_single.mp4"])
+    # 2. per-slot merge: static tile cuts (MP4Box -split-chunk, cached), band slot,
+    #    inject SRD, hevcmerge -> 4 s single-tile HEVC per picked slot
+    cuts = f"{a.store}/cuts"; os.makedirs(cuts, exist_ok=True)
+    n_picked = len(slots)
+    t0 = time.time()
+    slot_mergeds = []
+    for i, s in enumerate(slots):
+        print(f"[slot {i} seg {s}] t={t0s if False else s*4}s: cutting", flush=True)
+        t0s, t1s = s * meta["seg_dur"], (s + 1) * meta["seg_dur"]
+        chunk = f"{t0s:g}:{t1s:g}"
+        s4 = []
+        for k in range(1, N):
+            c = f"{cuts}/t{k}_s{s:04d}.mp4"
+            if not os.path.exists(c):
+                sh([a.mp4box, "-split-chunk", chunk, f"{d}/t{k}.mp4", "-out", c])
+            s4.append(c)
+        bslot = f"{tmp}/bslot_{i:02d}.mp4"
+        sh([a.mp4box, "-split-chunk", f"{i * meta['seg_dur']:g}:{(i + 1) * meta['seg_dur']:g}",
+            f"{tmp}/band_user.mp4", "-out", bslot])
+        add = []
+        for c in s4:
+            add += ["-add", c]
+        sh([a.mp4box] + add + ["-add", bslot, "-new", "-quiet", f"{tmp}/merged.mp4"])
+        print(f"[slot {i}] merged.mp4 = {os.path.getsize(f'{tmp}/merged.mp4')}", flush=True)
+        sh(["python3", os.path.join(HERE, "inject_srd.py"), f"{tmp}/merged.mp4",
+            f"{tmp}/merged_srd.mp4", "0", str(band_y), str(W), str(H)])
+        sh([a.gpac_bin, "-i", f"{tmp}/merged_srd.mp4", "hevcmerge", "-o", f"{tmp}/mone_{i:02d}.mp4"])
+        print(f"[slot {i}] mone = {os.path.getsize(f'{tmp}/mone_{i:02d}.mp4')}", flush=True)
+        slot_mergeds.append(f"{tmp}/mone_{i:02d}.mp4")
     dt_enc = time.time() - t0
-    # 3. package picked segments (disco/MAP manifests over shared base segs)
+    # 3. concat merged slots -> one fMP4 HLS pass (GOP-aligned, -c copy)
     out = a.out; os.makedirs(out, exist_ok=True)
     t1 = time.time()
-    for s in slots:
-        t2 = time.time()
-        s0, s1 = s * gop, (s + 1) * gop
-        subprocess.run(f'ffmpeg -v error -y -i {tmp}/merged_single.mp4 -vf select=\'between(n\\,{s0}\\,{s1-1})\' -vsync 0 -frames:v {gop} -c:v hevc_mvc 2>/dev/null', shell=True, capture_output=True)
-        # simpler: cut with -ss/-t and re-wrap (hevcmerge output is a plain mp4)
-        subprocess.run(f'ffmpeg -v error -y -i {tmp}/merged_single.mp4 -ss {s0/fps:.6f} -t {meta["seg_dur"]:.6f} '
-                       f'-c:v copy -an -f hls -hls_time {meta["seg_dur"]} -hls_playlist_type vod '
-                       f'-hls_segment_type fmp4 -hls_fmp4_init_filename init_{a.uid}.mp4 '
-                       f'-hls_segment_filename {out}/su_{s:04d}_%d.m4s {out}/cut_{s}.m3u8',
-                       shell=True, capture_output=True)
+    cat = []
+    for m in slot_mergeds:
+        cat += ["-cat", m]
+    sh([a.mp4box] + cat + ["-new", "-quiet", f"{tmp}/merged_user.mp4"])
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", f"{tmp}/merged_user.mp4", "-c:v", "copy", "-an",
+         "-f", "hls", "-hls_time", f"{meta['seg_dur']}", "-hls_playlist_type", "vod",
+         "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
+         "-hls_segment_filename", f"{out}/su_%04d.m4s", f"{out}/pl.m3u8"],
+        cwd=tmp, capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"package failed: {r.stderr[-800:]}")
+    for f_ in os.listdir(tmp):
+        if f_.endswith(".m4s") or f_ == "init.mp4":
+            shutil.move(os.path.join(tmp, f_), os.path.join(out, f_))
+    n_segs = len([f for f in os.listdir(out) if f.endswith(".m4s")])
     print(f"[user {a.uid}] band+merge {dt_enc:.0f}s, package {time.time()-t1:.0f}s "
-          f"({nslots} slots) -> {out}", flush=True)
+          f"-> {n_segs}/{n_picked} fMP4 segs in {out}", flush=True)
 
 def main():
     ap = argparse.ArgumentParser()
