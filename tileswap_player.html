@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HEVC Tile-Swap Watermark — BBB 640x320 pilot</title>
+<meta name="cache-control" content="max-age=60">
+<style>
+  body { background:#0e0e12; color:#ddd; font:14px/1.5 system-ui, sans-serif; margin:24px; }
+  h1 { font-size:18px; font-weight:600; color:#fff; }
+  select, button { background:#1c1c24; color:#ddd; border:1px solid #333; border-radius:6px; padding:6px 10px; font-size:14px; }
+  video { width:640px; max-width:100%; background:#000; border-radius:8px; display:block; margin-top:12px; }
+  #log { white-space:pre-wrap; font:11px/1.5 ui-monospace, monospace; color:#8f8; margin-top:12px; max-height:180px; overflow:auto;
+         background:#12121a; padding:8px; border-radius:6px; width:640px; max-width:100%; box-sizing:border-box; }
+  .note { color:#888; max-width:640px; }
+  .mark { color:#6cf; }
+</style>
+</head>
+<body>
+<h1>HEVC tile-swap watermark — <span class="mark">true per-frame mark</span> (scrim over live video, bottom 64px)</h1>
+<div>
+  <label>Stream: </label>
+  <select id="sel">
+    <option value="pl_base.m3u8">Base — no watermark</option>
+    <option value="pl_u42.m3u8" selected>User u42 — 15 marked slots</option>
+    <option value="pl_u01.m3u8">User u01 — 15 marked slots</option>
+  </select>
+  <button id="reload">Reload</button>
+</div>
+<video id="v" controls muted></video>
+<div id="log"></div>
+<p class="note">10-min BBB pilot, 640x320, 4s segments. Marked slots carry a
+semi-transparent scrim + user ID burned into the bottom tile only; the other 4
+tiles are bit-identical to the shared base. Seek anywhere — the mark appears in
+the same ~10% of the timeline for every copy, at user-specific times.</p>
+<p class="note"><b>No HEVC decoder in this browser?</b> Watch the H.264 renders
+of each user's marked slots instead:
+<a style="color:#6cf" href="preview_u42.mp4">u42 (60s, 15 marked slots)</a> ·
+<a style="color:#6cf" href="preview_u01.mp4">u01 (60s, 15 marked slots)</a></p>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+<script>
+const log = (m) => { const el = document.getElementById('log');
+  el.textContent += m + "\n"; el.scrollTop = el.scrollHeight; };
+let hls = null;
+function load(sel) {
+  if (hls) { hls.destroy(); hls = null; }
+  const v = document.getElementById('v');
+  document.getElementById('log').textContent = '';
+  log('loading ' + sel);
+  if (!Hls.isSupported()) { log('MSE not supported'); return; }
+  hls = new Hls({ maxBufferHole: 0.5 });
+  hls.on(Hls.Events.MANIFEST_PARSED, () => log('manifest ok, levels=' + hls.levels.length));
+  hls.on(Hls.Events.ERROR, (e, d) => {
+    if (d.fatal) { log('FATAL ' + d.type + ' ' + d.details); }
+    else { log('warn: ' + d.details); }
+  });
+  hls.on(Hls.Events.FRAG_LOADED, (e, d) => {
+    const u = d.frag.url.split('/').slice(-2).join('/');
+    if (u.includes('u42') || u.includes('u01')) log('marked seg: ' + u);
+  });
+  hls.loadSource(sel);
+  hls.attachMedia(v);
+  v.play().catch(() => {});
+}
+document.getElementById('reload').onclick = () => load(document.getElementById('sel').value);
+document.getElementById('sel').onchange = (e) => load(e.target.value);
+load(document.getElementById('sel').value);
+</script>
+</body>
+</html>
