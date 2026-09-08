@@ -73,3 +73,38 @@ Live demo: `https://lec-host.pxysio.top/wm2test/bbb-mcts2/player.html`
 
 MIT for `watermark.py`, `inject_srd.py`, `player.html`.
 Toolchain licenses: kvazaar BSD-3, x264/ffmpeg GPL, GPAC LGPL.
+
+
+## watermark_tiles.py — technique C: HEVC tile-swap (true per-frame mark)
+
+One-time per video (`init`): kvazaar master with `--tiles 1x5` (CTU-aligned:
+height multiple of 64), `hevcsplit`, per-track extraction (full-length sanity
+check), band strip decode (`band.yuv`).
+
+Per user (`user`): byte-seek extract of the picked slots' band strip -> scrim +
+drawtext overlay -> kvazaar band encode (default gop, must MATCH the master's
+GOP family) -> GOP-cut (hevc_gopcut.py) -> per-slot merge:
+
+  statics   = GOP-cut chunk of each tiled track (cached per slot across users)
+              + per-tile GSRD injection (hevcmerge rejects implicit positioning)
+  band      = user's band chunk for the slot + params.266 prepended (kvazaar
+              repeats SPS/PPS only once, mid-stream chunks need it)
+  merge     = MP4Box -add 5 positioned tracks -> hevcmerge (single 4s clip)
+  package   = ffmpeg fMP4 per slot (identical SPS -> one shared init)
+
+Hard-won rules:
+- `--preset` must come BEFORE `--gop` on the kvazaar command line (preset
+  re-sets gop and silently overrides your flag).
+- Full-length merge of pyramid statics + independent band track produces green
+  garbage; only per-slot GOP-aligned chunks merge cleanly.
+- MP4Box -split-chunk loses/miscounts frames (82/96 observed); cut at the
+  Annex-B ES level with hevc_gopcut.py instead (first_slice_segment_in_pic_flag
+  AUs, IDR = GOP boundary).
+- Never cut these streams by time in a demuxer: P-pyramid decode order != PTS.
+
+Measured (10-min BBB 640x320, 149 segs, 10% = 15 slots, 2 vCPU):
+  init lazy parts: band decode 25-32 s, base band encode 85-120 s (once)
+  per user cold: 57.5 s wall; per user warm (statics cached): ~3 s wall
+  per-user unique storage: 2.2-2.5 MB (15 segs + shared init)
+  verified: mark pixel-visible in delivered segs of 2 users, distinct seeded
+  slot sets, 96-frame 4.04 s segments.
