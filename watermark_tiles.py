@@ -48,6 +48,15 @@ def cmd_init(a):
     sh([G, "-i", master, "hevcsplit", "-o", f"{d}/tiled.mp4"])
     for k in range(1, N + 1):
         sh([M, "-add", f"{d}/tiled.mp4#{k}", "-new", "-quiet", f"{d}/t{k}.mp4"])
+        # sanity: full-length extraction (MP4Box -add drops AUs on some inputs)
+        n = int(subprocess.run(
+            ["ffprobe", "-v", "error", "-count_packets", "-select_streams", "v",
+             "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", f"{d}/t{k}.mp4"],
+            capture_output=True, text=True).stdout.strip() or 0)
+        if n != meta["frames"]:
+            print(f"[init] t{k}.mp4 short ({n} != {meta['frames']}), re-extracting with ffmpeg", flush=True)
+            sh(["ffmpeg", "-v", "error", "-y", "-i", f"{d}/tiled.mp4",
+                "-map", f"0:v:{k-1}", "-c:v", "copy", "-an", f"{d}/t{k}.mp4"])
     # decode band once (static tiles never change; band pixels reused per user)
     band_h = H - (H // N) * (N - 1)
     band_y = H - band_h
@@ -134,8 +143,12 @@ def cmd_user(a):
         src = f"{d}/t{k}.mp4"
         dst = f"{d}/t{k}s.mp4"
         if not os.path.exists(dst):
-            sh(["python3", os.path.join(HERE, "inject_srd.py"), src, dst,
-                "0", str(y), str(W), str(H)])
+            r = subprocess.run(["python3", os.path.join(HERE, "inject_srd.py"), src, dst,
+                                "0", str(y), str(W), str(H)], capture_output=True, text=True)
+            if not os.path.exists(dst):
+                # track already carries its GSRD from hevcsplit — use as-is
+                shutil.copy(src, dst)
+                print(f"[gsrd] t{k} already positioned ({r.stdout or r.stderr}).strip()", flush=True)
         ins.append(dst)
     sh(["python3", os.path.join(HERE, "inject_srd.py"), f"{tmp}/band_full.mp4",
         f"{tmp}/band_full_srd.mp4", "0", str(band_y), str(W), str(H)])
