@@ -156,10 +156,12 @@ def cmd_user(a):
             ["ffmpeg", "-v", "error", "-y", "-i", f"{tmp}/o{i:02d}.mp4", "-c:v", "copy", "-an",
              "-f", "hls", "-hls_time", f"{meta['seg_dur']}", "-hls_playlist_type", "vod",
              "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", f"init_{i:02d}.mp4",
-             "-hls_segment_filename", f"{out}/su_{slots[i]:04d}.m4s",
+             "-hls_segment_filename", f"{out}/tmp_%04d.m4s",
              f"{tmp}/pl{i:02d}.m3u8"], capture_output=True, text=True)
         if r.returncode != 0:
             sys.exit(f"package slot {i} failed: {r.stderr[-500:]}")
+        os.rename(os.path.join(out, "tmp_0000.m4s"),
+                  os.path.join(out, f"su_{slots[i]:04d}.m4s"))
     shutil.copy(f"{tmp}/init_00.mp4", os.path.join(out, "init.mp4"))
     n_segs = len([f for f in os.listdir(out) if f.endswith(".m4s")])
     print(f"[user {a.uid}] band+merge {dt_enc:.0f}s, package {time.time()-t1:.0f}s "
