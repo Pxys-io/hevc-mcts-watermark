@@ -92,7 +92,7 @@ def cmd_user(a):
         "-vf", vf, "-pix_fmt", "yuv420p", "-f", "rawvideo", f"{tmp}/band_user.yuv"])
     sh(["kvazaar", "-i", f"{tmp}/band_user.yuv", "--input-res", f"{W}x{band_h}",
         "--input-fps", str(fps), "-o", f"{tmp}/band_user.266",
-        "-q", str(meta["qp"]), "--preset", meta["preset"], "--gop", "lp-g8d1t1", "-p", str(gop),
+        "-q", str(meta["qp"]), "--preset", meta["preset"], "-p", str(gop),
         "--no-open-gop", "--no-wpp", "--no-tmvp"])
     # 2. assemble a full-length band ES: user chunks for picked slots (each GOP
     #    is closed/independent), shared base band chunks elsewhere (byte ops only)
@@ -106,7 +106,7 @@ def cmd_user(a):
         tb = time.time()
         sh(["kvazaar", "-i", f"{d}/band.yuv", "--input-res", f"{W}x{band_h}",
             "--input-fps", str(fps), "-o", base_band,
-            "-q", str(meta["qp"]), "--preset", meta["preset"], "--gop", "lp-g8d1t1", "-p", str(gop),
+            "-q", str(meta["qp"]), "--preset", meta["preset"], "-p", str(gop),
             "--no-open-gop", "--no-wpp", "--no-tmvp"])
         print(f"[init-lazy] base band {time.time()-tb:.0f}s", flush=True)
     base_chunks = f"{d}/band_gops"
@@ -125,13 +125,25 @@ def cmd_user(a):
                 o.write(f.read())
     sh([a.mp4box, "-add", f"{tmp}/band_full.266", "-new", "-quiet", f"{tmp}/band_full.mp4"])
     # 3. full-length merge (no demux cutting anywhere)
-    add = []
+    # each input track needs explicit GSRD positioning for hevcmerge
+    # (hevcsplit tracks carry their own; ffmpeg-extracted ones lose it)
+    t0 = time.time()
+    ins = []
     for k in range(1, N):
-        add += ["-add", f"{d}/t{k}.mp4"]
-    sh([a.mp4box] + add + ["-add", f"{tmp}/band_full.mp4", "-new", "-quiet", f"{tmp}/merged.mp4"])
-    sh(["python3", os.path.join(HERE, "inject_srd.py"), f"{tmp}/merged.mp4",
-        f"{tmp}/merged_srd.mp4", "0", str(band_y), str(W), str(H)])
-    sh([a.gpac_bin, "-i", f"{tmp}/merged_srd.mp4", "hevcmerge", "-o", f"{tmp}/merged_single.mp4"])
+        y = (k - 1) * H // N
+        src = f"{d}/t{k}.mp4"
+        dst = f"{d}/t{k}s.mp4"
+        if not os.path.exists(dst):
+            sh(["python3", os.path.join(HERE, "inject_srd.py"), src, dst,
+                "0", str(y), str(W), str(H)])
+        ins.append(dst)
+    sh(["python3", os.path.join(HERE, "inject_srd.py"), f"{tmp}/band_full.mp4",
+        f"{tmp}/band_full_srd.mp4", "0", str(band_y), str(W), str(H)])
+    add = []
+    for s in ins:
+        add += ["-add", s]
+    sh([a.mp4box] + add + ["-add", f"{tmp}/band_full_srd.mp4", "-new", "-quiet", f"{tmp}/merged.mp4"])
+    sh([a.gpac_bin, "-i", f"{tmp}/merged.mp4", "hevcmerge", "-o", f"{tmp}/merged_single.mp4"])
     # 4. package: one ffmpeg fMP4 pass over the merged MP4 (IDR-aligned, -c copy),
     #    then keep only the picked segments (unpicked slots are served from base)
     t0 = time.time()
