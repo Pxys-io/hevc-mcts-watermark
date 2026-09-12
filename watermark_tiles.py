@@ -109,6 +109,12 @@ def cmd_user(a):
     t0 = time.time()
     user_chunks = f"{tmp}/uchunks"
     sh(gopcut + [f"{tmp}/band_user.266", user_chunks])
+    # band mux reference: full-stream MP4Box import (crash-free, unlike
+    # per-chunk -add which segfaults on some IDR payloads) + AU offsets
+    sh([a.mp4box, "-add", f"{tmp}/band_user.266", "-new", "-quiet", f"{tmp}/bandfull.mp4"])
+    sys.path.insert(0, HERE)
+    from hevc_gopcut import split_aus as split_aus_fn
+    au_off = 0
     cuts = f"{a.store}/cuts"; os.makedirs(cuts, exist_ok=True)
     n_picked = len(slots)
     for i, s in enumerate(slots):
@@ -129,14 +135,19 @@ def cmd_user(a):
                                    capture_output=True, text=True)
                 if not os.path.exists(cs):
                     shutil.copy(c, cs)
-        # user band slot i: chunk i of band_user.266 (in picked order), params prepended
+        # user band slot i: chunk i of band_user.266 (in picked order), params prepended;
+        # wrapped with es2mp4 (MP4Box -add segfaults on some chunks, es2mp4
+        # steals timing/hvcC from the full-stream import instead)
         bsrc = f"{tmp}/b{i:02d}.266"
         with open(bsrc, "wb") as o:
             with open(os.path.join(user_chunks, "params.266"), "rb") as f:
                 o.write(f.read())
             with open(os.path.join(user_chunks, f"gop_{i:04d}.266"), "rb") as f:
                 o.write(f.read())
-        sh([a.mp4box, "-add", bsrc, "-new", "-quiet", f"{tmp}/b{i:02d}.mp4"])
+        n_au = len(split_aus_fn(open(bsrc, "rb").read()))
+        sh(["python3", os.path.join(HERE, "es2mp4.py"), bsrc, f"{tmp}/bandfull.mp4",
+            str(au_off), f"{tmp}/b{i:02d}.mp4"])
+        au_off += n_au
         r = subprocess.run(["python3", os.path.join(HERE, "inject_srd.py"),
                             f"{tmp}/b{i:02d}.mp4", f"{tmp}/b{i:02d}s.mp4",
                             "0", str(band_y), str(W), str(H)], capture_output=True, text=True)
