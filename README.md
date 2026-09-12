@@ -108,3 +108,24 @@ Measured (10-min BBB 640x320, 149 segs, 10% = 15 slots, 2 vCPU):
   per-user unique storage: 2.2-2.5 MB (15 segs + shared init)
   verified: mark pixel-visible in delivered segs of 2 users, distinct seeded
   slot sets, 96-frame 4.04 s segments.
+
+## Stall fix (2026-09-12): run-based fMP4 packaging
+
+Symptom: hls.js played two adjacent marked segs then stalled with
+`bufferStalledError` + `bufferSeekOverHole`.
+
+Root cause: each merged slot was packaged in its own ffmpeg HLS pass, so every
+marked segment restarted tfdt at 0. Two adjacent marked slots (e.g. u01 slots
+4+5) arrived back-to-back under one MAP with identical timestamps -> buffer
+hole. Fix: `MP4Box -cat` each maximal run of consecutive slots, then ONE ffmpeg
+fMP4 pass per run (tfdt 0 -> 97000 continuous across the pair).
+
+## es2mp4.py: MP4Box -add segfault workaround
+
+`MP4Box -add` (vendored gpac) segfaults importing some kvazaar band chunks
+(content-dependent IDR payload; full-stream import of the same bytes works).
+`es2mp4.py CHUNK.266 REF.mp4 AU_OFFSET OUT.mp4` wraps Annex-B AUs as MP4 samples
+in pure Python, stealing timing (stts/ctts slice) + hvc1 entry from a reference
+MP4. Output verified decode-identical (framemd5) and merges clean. Also fixed
+along the way: shared NAL scanner moved into `hevc_gopcut.nal_units` (a local
+copy mis-measured 4-byte start codes), and vmhd box size.
