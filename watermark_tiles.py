@@ -148,21 +148,40 @@ def cmd_user(a):
         sh([a.mp4box] + add + ["-add", f"{tmp}/b{i:02d}s.mp4", "-new", "-quiet", f"{tmp}/m{i:02d}.mp4"])
         sh([a.gpac_bin, "-i", f"{tmp}/m{i:02d}.mp4", "hevcmerge", "-o", f"{tmp}/o{i:02d}.mp4"])
     dt_enc = time.time() - t0
-    # 3. package each merged slot as fMP4 (identical SPS -> one shared init)
+    # 3. package each maximal RUN of consecutive slots in one fMP4 pass
+    #    (per-slot passes reset tfdt to 0; adjacent marked segs then carry
+    #    identical timestamps -> hls.js buffer hole + stall. one pass per
+    #    run keeps tfdt continuous; DISCONTINUITY re-anchors run starts.)
+    runs, cur = [], [0]
+    for i in range(1, n_picked):
+        if slots[i] == slots[i - 1] + 1:
+            cur.append(i)
+        else:
+            runs.append(cur); cur = [i]
+    runs.append(cur)
     out = a.out; os.makedirs(out, exist_ok=True)
     t1 = time.time()
-    for i in range(n_picked):
-        r = subprocess.run(
-            ["ffmpeg", "-v", "error", "-y", "-i", f"{tmp}/o{i:02d}.mp4", "-c:v", "copy", "-an",
+    for r, run in enumerate(runs):
+        run_mp4 = f"{tmp}/run{r:02d}.mp4"
+        if len(run) == 1:
+            shutil.copy(f"{tmp}/o{run[0]:02d}.mp4", run_mp4)
+        else:
+            cat = []
+            for i in run:
+                cat += ["-cat", f"{tmp}/o{i:02d}.mp4"]
+            sh([a.mp4box] + cat + ["-new", "-quiet", run_mp4])
+        r2 = subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-i", run_mp4, "-c:v", "copy", "-an",
              "-f", "hls", "-hls_time", f"{meta['seg_dur']}", "-hls_playlist_type", "vod",
-             "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", f"init_{i:02d}.mp4",
-             "-hls_segment_filename", f"{out}/tmp_%04d.m4s",
-             f"{tmp}/pl{i:02d}.m3u8"], capture_output=True, text=True)
-        if r.returncode != 0:
-            sys.exit(f"package slot {i} failed: {r.stderr[-500:]}")
-        os.rename(os.path.join(out, "tmp_0000.m4s"),
-                  os.path.join(out, f"su_{slots[i]:04d}.m4s"))
-    shutil.copy(f"{tmp}/init_00.mp4", os.path.join(out, "init.mp4"))
+             "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", f"init_r{r:02d}.mp4",
+             "-hls_segment_filename", f"{out}/run{r:02d}_%04d.m4s",
+             f"{tmp}/plr{r:02d}.m3u8"], capture_output=True, text=True)
+        if r2.returncode != 0:
+            sys.exit(f"package run {r} failed: {r2.stderr[-500:]}")
+        for k, i in enumerate(run):
+            os.rename(os.path.join(out, f"run{r:02d}_{k:04d}.m4s"),
+                      os.path.join(out, f"su_{slots[i]:04d}.m4s"))
+    shutil.copy(f"{tmp}/init_r00.mp4", os.path.join(out, "init.mp4"))
     n_segs = len([f for f in os.listdir(out) if f.endswith(".m4s")])
     print(f"[user {a.uid}] band+merge {dt_enc:.0f}s, package {time.time()-t1:.0f}s "
           f"-> {n_segs}/{n_picked} fMP4 segs in {out}", flush=True)
