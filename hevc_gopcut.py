@@ -23,6 +23,23 @@ def start_code_iter(buf):
             i += 1
 
 
+def nal_units(buf):
+    """Yield (offset, sc_len, nal_type) for each NAL in an Annex-B buffer."""
+    for pos, sc in start_code_iter(buf):
+        start = pos - 1 if sc == 4 else pos  # include leading zero of 4-byte code
+        yield start, sc, (buf[pos + 3] >> 1) & 0x3F
+
+
+def split_aus(buf):
+    """Split Annex-B buffer into AU byte-strings (first-slice-flag aware)."""
+    nals = []
+    for start, sc, t in nal_units(buf):
+        fs = (buf[start + sc + 2] >> 7) & 1 if t <= 31 else 0
+        nals.append((start, t, fs))
+    bounds = [off for off, t, fs in nals if t <= 31 and fs] + [len(buf)]
+    return [bytes(buf[a:b]) for a, b in zip(bounds, bounds[1:])]
+
+
 def main():
     src, out_dir = sys.argv[1], sys.argv[2]
     first = int(sys.argv[3]) if len(sys.argv) > 3 else 0
