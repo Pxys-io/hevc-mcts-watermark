@@ -133,7 +133,7 @@ def main():
                      + box(b"stsc", stsc) + box(b"stsz", stsz)
                      + box(b"stco", struct.pack(">II", 0, 1) + struct.pack(">I", 0)))  # patched later
     stbl = box(b"stbl", stbl_children)
-    minf = box(b"minf", box(b"vmhd", bytes([0, 0, 0, 1]) + struct.pack(">HHH", 0, 0, 0))
+    minf = box(b"minf", box(b"vmhd", bytes([0, 0, 0, 1]) + struct.pack(">HHHH", 0, 0, 0, 0))
                + box(b"dinf", box(b"dref", struct.pack(">II", 0, 1) + box(b"url ", bytes([0, 0, 0, 1]))))
                + stbl)
     # patch durations (offsets relative to box start, header included)
@@ -160,7 +160,7 @@ def main():
     # rebuild stbl with real stco (sizes unchanged -> offsets stable)
     stbl_children = stbl_children[:-4] + struct.pack(">I", stco_off)
     stbl = box(b"stbl", stbl_children)
-    minf = box(b"minf", box(b"vmhd", bytes([0, 0, 0, 1]) + struct.pack(">HHH", 0, 0, 0))
+    minf = box(b"minf", box(b"vmhd", bytes([0, 0, 0, 1]) + struct.pack(">HHHH", 0, 0, 0, 0))
                + box(b"dinf", box(b"dref", struct.pack(">II", 0, 1) + box(b"url ", bytes([0, 0, 0, 1]))))
                + stbl)
     mdia = box(b"mdia", bytes(mdhd) + box(b"hdlr", struct.pack(">IHH", 0, 0, 0) + b"vide\x00\x00\x00\x00\x00" + b"tile-band\x00") + minf)
